@@ -17,6 +17,9 @@ from eth_typing import HexStr
 from hexbytes import HexBytes
 from toolz import dissoc
 from web3 import Web3
+from web3._utils.method_formatters import (
+    get_request_formatters,
+)
 from web3.exceptions import TransactionNotFound
 from web3.method import Method
 from web3.module import Module
@@ -38,6 +41,7 @@ SECONDS_PER_BLOCK = 12
 class FlashbotsRPC:
     eth_sendBundle = RPCEndpoint("eth_sendBundle")
     eth_callBundle = RPCEndpoint("eth_callBundle")
+    eth_estimateGasBundle = RPCEndpoint("eth_estimateGasBundle")
     eth_cancelBundle = RPCEndpoint("eth_cancelBundle")
     eth_sendPrivateTransaction = RPCEndpoint("eth_sendPrivateTransaction")
     eth_cancelPrivateTransaction = RPCEndpoint("eth_cancelPrivateTransaction")
@@ -353,6 +357,72 @@ class Flashbots(Module):
 
     call_bundle: Method[Callable[[Any], Any]] = Method(
         json_rpc_method=FlashbotsRPC.eth_callBundle, mungers=[call_bundle_munger]
+    )
+
+    def estimate_gas(
+        self,
+        bundled_transactions: List[TxParams],
+        block_tag: Union[int, str] = None,
+        state_block_tag: int = None,
+        block_timestamp: int = None,
+    ):
+        # Note: Unlike in simulate, by default pending block is targeted
+        #   meaning "latest" + 1
+        block_number = (
+            self.web3.eth.block_number + 1
+            if block_tag is None or block_tag == "latest"
+            else block_tag
+        )
+
+        # sets evm params
+        evm_block_number = self.web3.toHex(block_number)
+        evm_block_state_number = (
+            self.web3.toHex(state_block_tag)
+            if state_block_tag is not None
+            else self.web3.toHex(block_number - 1)
+        )
+        evm_timestamp = (
+            block_timestamp
+            if block_timestamp is not None
+            else self.extrapolate_timestamp(block_number, self.web3.eth.block_number)
+        )
+
+        return self.estimate_bundle_gas(
+            bundled_transactions,
+            evm_block_number,
+            evm_block_state_number,
+            evm_timestamp,
+        )
+
+    def estimate_gas_munger(
+        self,
+        bundled_transactions: List[FlashbotsBundleDictTx],
+        evm_block_number: HexStr,
+        evm_block_state_number: HexStr,
+        evm_timestamp: int,
+    ) -> dict:
+        # hijack estimate gas formatter :O
+        def format_chainid(d):
+            if "chainId" in d:
+                d["chainId"] = Web3.toHex(d["chainId"])
+            return d
+
+        tx_formatter = get_request_formatters(RPCEndpoint("eth_estimateGas"))
+        res = [
+            {
+                "txs": [
+                    format_chainid(tx_formatter([tx])[0]) for tx in bundled_transactions
+                ],
+                "blockNumber": evm_block_number,
+                "stateBlockNumber": evm_block_state_number,
+                "timestamp": evm_timestamp,
+            }
+        ]
+        return res
+
+    estimate_bundle_gas: Method[Callable[[Any], Any]] = Method(
+        json_rpc_method=FlashbotsRPC.eth_estimateGasBundle,
+        mungers=[estimate_gas_munger],
     )
 
     def get_user_stats_munger(self) -> List:
